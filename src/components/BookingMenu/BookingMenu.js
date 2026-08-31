@@ -37,7 +37,7 @@ const BookingMenu = ({ onMakeAppointment, onModifyAppointment, onBack }) => {
           </div>
           <div className="mb-2 mt-3">
             <div className="">
-              <a aria-label="Chat on WhatsApp" href="https://wa.me/821058379012">
+              <a aria-label="Chat on WhatsApp" href="https://wa.me/821073668161">
                 <img alt="Chat on WhatsApp" src="assets/images/whatsapp/WhatsAppButtonGreenLarge.svg" />
               </a>
             </div>
