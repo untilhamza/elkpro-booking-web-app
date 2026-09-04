@@ -179,19 +179,6 @@ export async function httpSubmitBooking(bookingData) {
   return result.id;
 }
 
-export async function httpEditBooking(booking) {
-  try {
-    const response = await fetch(`${API_URL}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "editBooking", booking }),
-    });
-    return response;
-  } catch (err) {
-    throw err;
-  }
-}
-
 export async function httpCancelBooking(id) {
   try {
     return await call("cancelBooking", { id });

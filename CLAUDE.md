@@ -1,85 +1,120 @@
 # ElkPro Cut — booking web app
 
-Appointment booking site for ElkPro Cut (a barber/services shop in Seoul).
-Create React App (react-scripts 5) + React 18 + Firebase (Auth + Firestore),
-deployed to Netlify at https://elkpro.netlify.app.
+Appointment booking site for ElkPro Cut (a barber shop in Yongsan, Seoul).
+Create React App (react-scripts 5) + React 18, deployed to Netlify at
+https://elkpro.netlify.app.
+
+Data lives in **Neon Postgres**, reached through a Netlify Function.
+**Auth is still Firebase** — that migration has not happened yet. See below,
+because the split matters.
 
 The GitHub repo was renamed `Booking-Web-App` -> `elkpro-booking-web-app` in
-September 2026. Old links still redirect. The `name` field in `package.json` is
-`appointments` and its `repository.url` still points at the old `hsanshine/`
-fork path — neither is load-bearing.
+September 2026. Old links still redirect.
 
 ## Running it locally
 
 ```bash
 yarn install
-yarn start          # or: npm start
+netlify dev          # http://localhost:8888
 ```
 
-**A blank white page means missing env vars, not a build failure.**
-`src/database/firebase-config.js` calls `getAuth()` at module load; with an
-undefined `apiKey` it throws before React mounts, so `#root` stays empty and the
-console shows nothing useful. Create a `.env` (gitignored) with all seven:
+**Use `netlify dev`, not `npm start`.** Plain CRA does not run Netlify
+Functions, so `/.netlify/functions/api` returns 404 and every page that loads
+data breaks. `npm start` is only useful for pure-styling work.
+
+`.env` (gitignored) needs the seven `REACT_APP_*` Firebase values plus
+`DATABASE_URL`. Only `REACT_APP_*` reaches the browser — CRA inlines that
+prefix and nothing else, which is exactly why `DATABASE_URL` must never be
+renamed to carry it.
+
+Without the Firebase values the app renders a **blank page**: `getAuth()`
+throws at module load in `src/database/firebase-config.js`, React never
+mounts, and the console shows nothing useful. Same values are set on the
+Netlify site.
+
+## Architecture
 
 ```
-REACT_APP_API_KEY, REACT_APP_AUTH_DOMAIN, REACT_APP_PROJECT_ID,
-REACT_APP_STORAGE_BUCKET, REACT_APP_MESSAGING_SENDER_ID,
-REACT_APP_APPID, REACT_APP_MEASUREMENT_ID
+browser ──▶ /.netlify/functions/api ──▶ Neon Postgres     (all data)
+        └─▶ Firebase Auth                                 (sign-in only)
 ```
 
-The real values are set as environment variables on the Netlify site
-(Project configuration -> Environment variables). Placeholder values render the
-home page fine but break `/new-booking`: Firestore returns `permission-denied`,
-`settings` comes back `null`, and `TimeSelector` throws destructuring
-`startTime`. There is no null guard and no error boundary — worth fixing.
+- `netlify/functions/api.js` — one action-routed function, ~12 operations.
+- `src/http/serverInterface.ts` — the only module that talks to the API.
+  Components never call it directly; they go through the pages.
+- `db/schema.sql`, `db/load.py` — schema and the Firestore migration loader.
 
-## Use yarn, not npm
+A browser cannot hold a Postgres credential, which is the point: `DATABASE_URL`
+stays server-side. The previous design had the browser talk to Firestore
+directly with rules that allowed **anonymous read, write and delete of every
+booking**. Do not reintroduce direct-from-browser data access.
 
-Netlify builds with `yarn build`, and `yarn.lock` is the authoritative lockfile.
+### Slots are minute-granular
 
-`npm ci` **fails** — `package-lock.json` is out of sync with `package.json` and
-ERESOLVEs on `react-timekeeper`'s React 18 peer range. If you must use npm,
-`npm install --legacy-peer-deps` works. Both lockfiles are committed, which makes
-Netlify emit a mixed-lockfile warning; yarn wins.
+2,576 migrated rows carry sub-second timestamps, so never compare instants with
+`=`. Every slot comparison truncates:
+`date_trunc('minute', starts_at AT TIME ZONE 'UTC')`. The UTC pin is required —
+`date_trunc` on `timestamptz` is only STABLE and cannot be indexed otherwise.
+
+`bookings_one_confirmed_per_minute` is the real guard against double-booking.
+Six historical collisions (2022–2023) were resolved by demoting the later row
+to `cancelled` before it could be created.
+
+There is no `slots` table. Availability is derived: confirmed bookings plus
+`blocked_slots`. The old Firestore `slots` collection duplicated bookings and
+had already drifted (276 bookings with no slot row, 34 slots with no booking).
+
+### Settings times are strings, not SQL times
+
+`getSettings` returns `"1:00 pm"`, not `"13:00:00"`. `src/utils/helpers.js`
+parses them with `moment(start, "h:mma")` to build the slot grid, so the 24h
+form silently produces a wrong grid. The API converts with
+`to_char(start_time, 'FMHH12:MI am')`. Do not "simplify" this.
+
+## Use yarn
+
+Netlify runs `yarn build`. `yarn.lock` is authoritative and `package-lock.json`
+is gitignored — do not commit one, it triggers Netlify's mixed-lockfile warning.
 
 ## Node version
 
-Pinned to **22** via `.nvmrc`. Do not drop below 18.
+Pinned to **22** in `.nvmrc` and in Netlify's dependency settings, which govern
+builds *and* the functions runtime. Do not drop below 18.
 
-Netlify's dashboard still shows `16.x` under Dependency management — that
-setting is stale and `.nvmrc` overrides it. Node 16 was the default when the
-site was created in 2022.
+Production deploys silently broke for six months on Node 16: `node-releases`, a
+floating transitive dep of `browserslist`, raised its engine requirement to
+`>=18` and every build died during dependency installation. `yarn.lock` was
+refreshed at the same time so transitive deps are pinned rather than
+re-resolved each build.
 
-This matters: production deploys silently broke between March and August 2026
-with no code change. `node-releases`, a floating transitive dep of
-`browserslist`, raised its engine requirement to `>=18`, and every build died at
-the dependency-installation stage on Node 16:
+## Known gaps
 
-```
-error node-releases@2.0.54: The engine "node" is incompatible with this
-module. Expected version ">=18". Got "16.20.2"
-```
-
-`yarn.lock` was refreshed at the same time so transitive deps are pinned rather
-than re-resolved on every build, which is what let that break happen silently.
-Regenerating the lockfile again will re-float them — do it deliberately.
+- **Firebase Auth is unmanageable.** Nobody has console access to the
+  `appointments-9fa9d` project. Three admin **Firebase UIDs** are hardcoded in
+  `netlify/functions/api.js` and `src/store/auth-context.js`; admins cannot be
+  added or removed. Replacing auth (Neon Auth / Managed Better Auth) would make
+  admin a column instead. Only ~890 of 2,944 bookings have a user attached.
+- **Firestore still holds the old data** and is still anonymously readable and
+  deletable. Nothing reads it any more. It should be purged.
+- `TimeSelector` destructures `settings.startTime` with no null guard and there
+  is no error boundary, so a failed settings fetch blanks the booking page.
+- Guests book without logging in (69% of bookings), phone lookup is
+  unauthenticated by design, and the daily-booking rule (`count > 1`) in
+  practice permits two bookings per customer per day. All intentional.
 
 ## Deploys
 
-Auto-publish is on: any push to `main` deploys to production. PRs get Deploy
-Previews. Build command `yarn build`, publish directory `build`, production
-branch `main`.
+Auto-publish from `main`; PRs get Deploy Previews. Build `yarn build`, publish
+`build`. The Netlify CLI is installed — prefer `netlify` commands over the web
+UI, whose React buttons often ignore programmatic clicks.
 
-When a deploy seems missing, check the deploy log before assuming the hook is
-broken — the failure mode above looks exactly like "the webhook stopped firing"
-from the outside. GitHub shows no commit statuses or check runs for this repo,
-so GitHub is not a reliable signal for deploy health; read Netlify directly.
+When a deploy seems missing, read Netlify's own log. GitHub shows no commit
+statuses or check runs for this repo, so it is not a reliable signal.
 
 ## Layout
 
-- `src/components/` — UI, one directory per component (`BookingMenu`,
-  `TimeSelector`, `ClockPicker`, `MapDirections`, `NavBar`, ...)
-- `src/pages/` — routed pages (`NewBooking`, `SlotSettingsPage`, ...)
-- `src/database/firebase-config.js` — Firebase init, exports `auth` and `db`
-- `src/store/auth-context.js` — auth context provider
-- Routing is `react-router-dom` v5 (`Switch`/`Route`, not v6 `Routes`).
+- `src/components/` — one directory per component
+- `src/pages/` — routed pages (`NewBooking`, `SlotSettingsPage`, `Admin`, ...)
+- `src/store/auth-context.js` — Firebase auth context
+- `src/utils/helpers.js` — slot-grid generation, date/time combining
+- Routing is `react-router-dom` v5 (`Switch`/`Route`, not v6 `Routes`)

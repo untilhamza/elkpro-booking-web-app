@@ -24,3 +24,6 @@
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# yarn is the authoritative lockfile for this project (Netlify runs `yarn build`)
+package-lock.json
